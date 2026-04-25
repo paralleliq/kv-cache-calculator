@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KV Cache &amp; Context Window Cost — Paralleliq</title>
+
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-KSJPQGBGST"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-KSJPQGBGST');
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --purple: #7B35D4;
+      --blue:   #4A6CF7;
+      --cyan:   #00C4C4;
+      --bg:     #0a0a1a;
+      --card:   #111128;
+      --card2:  #16163a;
+      --text:   #e8eaf6;
+      --muted:  #8b8fad;
+      --border: #1e2048;
+      --radius: 12px;
+      --green:  #4ade80;
+      --yellow: #fbbf24;
+      --red:    #f87171;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px 80px;
+    }
+
+    header { text-align: center; margin-bottom: 40px; }
+    header img { height: 52px; margin-bottom: 24px; }
+    header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 10px; }
+    header p { font-size: 1.05rem; color: var(--muted); max-width: 600px; line-height: 1.6; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 36px 40px;
+      width: 100%;
+      max-width: 820px;
+      box-shadow: 0 4px 40px rgba(0,0,0,0.4);
+    }
+
+    .section-title {
+      font-size: 0.75rem; font-weight: 700; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin-bottom: 14px; padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+    .form-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+
+    label {
+      font-size: 0.82rem; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .label-hint { font-size: 0.75rem; font-weight: 400; text-transform: none; letter-spacing: 0; opacity: 0.7; margin-left: 6px; }
+
+    input, select {
+      padding: 11px 36px 11px 14px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.97rem;
+      color: var(--text);
+      background: var(--card2);
+      transition: border-color 0.2s;
+      appearance: none; -webkit-appearance: none;
+      width: 100%; cursor: pointer;
+    }
+    input { padding-right: 14px; }
+    input:focus, select:focus { outline: none; border-color: var(--blue); }
+
+    .select-wrap { position: relative; }
+    .select-wrap::after {
+      content: "▾"; position: absolute; right: 12px; top: 50%;
+      transform: translateY(-50%); color: var(--muted); pointer-events: none; font-size: 0.85rem;
+    }
+
+    .suffix-wrap { position: relative; }
+    .suffix-wrap input { padding-right: 52px; }
+    .suffix-wrap .suffix {
+      position: absolute; right: 12px; top: 50%;
+      transform: translateY(-50%); color: var(--muted); font-size: 0.82rem; pointer-events: none;
+    }
+
+    /* context slider */
+    .slider-field { display: flex; flex-direction: column; gap: 8px; }
+    .slider-row { display: flex; align-items: center; gap: 12px; }
+    .slider-row input[type=range] {
+      flex: 1; padding: 0; height: 4px; border: none; border-radius: 2px;
+      background: var(--border); cursor: pointer; accent-color: var(--blue);
+    }
+    .slider-val {
+      min-width: 68px; text-align: right;
+      font-size: 1rem; font-weight: 700; color: var(--cyan);
+    }
+    .slider-ticks {
+      display: flex; justify-content: space-between;
+      font-size: 0.7rem; color: var(--muted); padding: 0 2px;
+    }
+
+    .arch-note {
+      font-size: 0.78rem; color: var(--muted); margin-top: 4px;
+      padding: 8px 12px; background: var(--card2); border-radius: 6px;
+      border-left: 2px solid var(--blue);
+    }
+
+    .calc-btn {
+      width: 100%; padding: 14px; border: none; border-radius: 8px;
+      font-size: 1rem; font-weight: 700; cursor: pointer;
+      background: linear-gradient(90deg, var(--purple), var(--blue), var(--cyan));
+      color: #fff; letter-spacing: 0.02em; transition: opacity 0.2s, transform 0.1s;
+      margin-top: 8px;
+    }
+    .calc-btn:hover { opacity: 0.92; }
+    .calc-btn:active { transform: scale(0.99); }
+
+    /* ── Results ── */
+    #results { margin-top: 32px; display: none; }
+    .divider { border: none; border-top: 1px solid var(--border); margin-bottom: 28px; opacity: 0.5; }
+
+    .headline-metric { margin-bottom: 24px; }
+    .results-label { font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+    .big-number {
+      font-size: 2.6rem; font-weight: 800;
+      background: linear-gradient(90deg, var(--purple), var(--blue), var(--cyan));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+      line-height: 1.1; margin-bottom: 4px;
+    }
+    .big-sub { font-size: 0.9rem; color: var(--muted); }
+
+    .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 28px; }
+    .summary-item {
+      background: var(--card2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px 12px; text-align: center;
+    }
+    .si-value { font-size: 1.1rem; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+    .si-label { font-size: 0.73rem; color: var(--muted); line-height: 1.3; }
+    .si-value.green  { color: var(--green); }
+    .si-value.yellow { color: var(--yellow); }
+    .si-value.red    { color: var(--red); }
+    .si-value.cyan   { color: var(--cyan); }
+
+    /* VRAM bar */
+    .vram-section { margin-bottom: 28px; }
+    .vram-bar-wrap {
+      height: 36px; border-radius: 8px; overflow: hidden;
+      display: flex; background: var(--card2); border: 1px solid var(--border);
+      margin: 10px 0 8px;
+    }
+    .vram-seg { height: 100%; transition: width 0.4s ease; }
+    .vram-seg.weights { background: var(--purple); }
+    .vram-seg.kvcache { background: var(--blue); }
+    .vram-seg.overhead { background: var(--border); }
+    .vram-seg.free { background: rgba(74,222,128,0.2); }
+
+    .vram-legend { display: flex; gap: 16px; flex-wrap: wrap; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); }
+    .legend-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+    .legend-dot.weights { background: var(--purple); }
+    .legend-dot.kvcache { background: var(--blue); }
+    .legend-dot.overhead { background: var(--border); }
+    .legend-dot.free { background: rgba(74,222,128,0.4); }
+
+    /* context table */
+    .breakdown-title { font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px; }
+
+    .ctx-table { width: 100%; border-collapse: collapse; margin-bottom: 28px; font-size: 0.87rem; }
+    .ctx-table th {
+      text-align: left; font-size: 0.73rem; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .ctx-table td { padding: 9px 10px; border-bottom: 1px solid rgba(30,32,72,0.5); vertical-align: middle; }
+    .ctx-table tr:last-child td { border-bottom: none; }
+    .ctx-table tr.current-row td { background: rgba(74,108,247,0.07); }
+    .ctx-table tr.warn-row td { background: rgba(248,113,113,0.04); }
+
+    .ctx-badge {
+      display: inline-block; padding: 2px 7px; border-radius: 4px;
+      font-size: 0.72rem; font-weight: 700;
+    }
+    .ctx-badge.ok     { background: rgba(74,222,128,0.12); color: var(--green); }
+    .ctx-badge.warn   { background: rgba(251,191,36,0.12); color: var(--yellow); }
+    .ctx-badge.danger { background: rgba(248,113,113,0.12); color: var(--red); }
+    .ctx-badge.now    { background: rgba(74,108,247,0.18); color: var(--blue); }
+
+    /* signal box */
+    .signal-box {
+      background: linear-gradient(135deg, rgba(123,53,212,0.12), rgba(0,196,196,0.08));
+      border: 1px solid rgba(74,108,247,0.25); border-radius: 8px;
+      padding: 16px 18px; margin-bottom: 20px;
+      font-size: 0.9rem; color: var(--text); line-height: 1.6;
+    }
+    .signal-box strong { color: var(--cyan); }
+
+    /* share */
+    .share-row { display: flex; gap: 10px; margin-bottom: 20px; }
+    .share-btn {
+      background: transparent; border: 1.5px solid var(--border); color: var(--muted);
+      font-size: 0.88rem; font-weight: 600; padding: 10px 16px;
+      border-radius: 8px; cursor: pointer; transition: all 0.2s;
+    }
+    .share-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    .share-btn.copied { border-color: var(--green); color: var(--green); }
+
+    /* lead */
+    .lead-section {
+      background: linear-gradient(135deg, rgba(74,108,247,0.10), rgba(0,196,196,0.06));
+      border: 1px solid rgba(74,108,247,0.3); border-radius: 8px; padding: 18px; margin-bottom: 20px;
+    }
+    .lead-section p { font-size: 0.88rem; color: var(--muted); margin-bottom: 12px; line-height: 1.5; }
+    .lead-section p strong { color: var(--text); }
+    .lead-input-row { display: flex; gap: 8px; }
+    .lead-input-row input { padding: 10px 14px; flex: 1; font-size: 0.9rem; }
+    .lead-submit-btn {
+      width: auto; padding: 10px 18px; font-size: 0.88rem; white-space: nowrap;
+      flex-shrink: 0; border: none; border-radius: 8px; font-weight: 700; cursor: pointer;
+      background: linear-gradient(90deg, var(--purple), var(--blue)); color: #fff; transition: opacity 0.2s;
+    }
+    .lead-submit-btn:hover { opacity: 0.88; }
+    .lead-success { font-size: 0.88rem; color: var(--green); margin-top: 10px; display: none; }
+    .lead-error   { font-size: 0.88rem; color: var(--red);   margin-top: 10px; display: none; }
+
+    .caveat {
+      font-size: 0.78rem; color: var(--muted); line-height: 1.55;
+      margin-bottom: 20px; padding: 10px 14px; border-left: 2px solid var(--border);
+    }
+
+    footer { margin-top: 48px; font-size: 0.8rem; color: var(--muted); text-align: center; }
+    footer a { color: var(--blue); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      .card { padding: 24px 16px; }
+      .form-grid, .form-grid.three { grid-template-columns: 1fr; }
+      .summary-grid { grid-template-columns: 1fr 1fr; }
+      .lead-input-row { flex-direction: column; }
+      .lead-submit-btn { width: 100%; }
+      .vram-legend { gap: 10px; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <img src="logo.png" alt="Paralleliq" />
+  <h1>KV Cache &amp; Context Window Cost</h1>
+  <p>See exactly how context length consumes GPU memory, crushes concurrency, and drives up your cost per token — before it shows up on your cloud bill.</p>
+</header>
+
+<div class="card">
+
+  <!-- Section 1: Model & Hardware -->
+  <div class="section-title">Model &amp; Hardware</div>
+  <div class="form-grid" style="margin-bottom:8px;">
+    <div class="field">
+      <label>Model</label>
+      <div class="select-wrap">
+        <select id="model" onchange="onModelChange()">
+          <option value="7b">Llama 3 8B / Mistral 7B</option>
+          <option value="13b">Llama 2 13B</option>
+          <option value="30b">Llama 3 34B / CodeLlama 34B</option>
+          <option value="70b" selected>Llama 3 70B / Mixtral 8×7B</option>
+          <option value="180b">Llama 3 405B / Mixtral 8×22B</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>GPU</label>
+      <div class="select-wrap">
+        <select id="gpu" onchange="onInput()">
+          <option value="t4">NVIDIA T4 — 16 GB</option>
+          <option value="l4">NVIDIA L4 — 24 GB</option>
+          <option value="a10">NVIDIA A10 — 48 GB</option>
+          <option value="a100-40">NVIDIA A100 — 40 GB</option>
+          <option value="a100-80" selected>NVIDIA A100 — 80 GB</option>
+          <option value="h100">NVIDIA H100 — 80 GB</option>
+          <option value="h200">NVIDIA H200 — 141 GB</option>
+          <option value="mi300x">AMD MI300X — 192 GB</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="form-grid" style="margin-bottom:4px;">
+    <div class="field">
+      <label>KV Cache Precision</label>
+      <div class="select-wrap">
+        <select id="precision" onchange="onInput()">
+          <option value="2">FP16 / BF16 (2 bytes)</option>
+          <option value="1">FP8 (1 byte) — 2× memory savings</option>
+          <option value="0.5">INT4 (0.5 bytes) — 4× memory savings</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Cloud Provider</label>
+      <div class="select-wrap">
+        <select id="provider" onchange="onInput()">
+          <option value="gcp" selected>Google Cloud (GCP)</option>
+          <option value="aws">Amazon Web Services (AWS)</option>
+          <option value="azure">Microsoft Azure</option>
+          <option value="coreweave">CoreWeave</option>
+          <option value="lambda">Lambda Labs</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div id="archNote" class="arch-note" style="margin-bottom:24px;"></div>
+
+  <!-- Section 2: Context & Traffic -->
+  <div class="section-title">Context Window &amp; Traffic</div>
+
+  <div class="field slider-field" style="margin-bottom:20px;">
+    <label>Context Window Size</label>
+    <div class="slider-row">
+      <input type="range" id="ctxSlider" min="0" max="8" value="4" oninput="onSlider()" />
+      <div class="slider-val" id="ctxLabel">32K</div>
+    </div>
+    <div class="slider-ticks">
+      <span>2K</span><span>4K</span><span>8K</span><span>16K</span><span>32K</span>
+      <span>64K</span><span>128K</span><span>256K</span><span>1M</span>
+    </div>
+  </div>
+
+  <div class="form-grid three" style="margin-bottom:28px;">
+    <div class="field">
+      <label>Requests / Sec <span class="label-hint">(peak)</span></label>
+      <div class="suffix-wrap">
+        <input type="number" id="rps" value="5" min="0.1" step="0.1" oninput="onInput()" />
+        <span class="suffix">RPS</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>Avg Output Tokens</label>
+      <div class="suffix-wrap">
+        <input type="number" id="outputTok" value="512" min="1" oninput="onInput()" />
+        <span class="suffix">tok</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>GPUs per Replica</label>
+      <div class="select-wrap">
+        <select id="gpuCount" onchange="onInput()">
+          <option value="1" selected>1 GPU</option>
+          <option value="2">2 GPUs (tensor parallel)</option>
+          <option value="4">4 GPUs</option>
+          <option value="8">8 GPUs</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <button class="calc-btn" onclick="calculate()">Calculate KV Cache Cost</button>
+
+  <!-- ── Results ── -->
+  <div id="results">
+    <hr class="divider" style="margin-top:32px;" />
+
+    <!-- Headline -->
+    <div class="headline-metric">
+      <div class="results-label">KV Cache Per Request</div>
+      <div class="big-number" id="kvPerReq">—</div>
+      <div class="big-sub" id="kvSub">—</div>
+    </div>
+
+    <!-- Summary grid -->
+    <div class="summary-grid">
+      <div class="summary-item">
+        <div class="si-value" id="sumWeights">—</div>
+        <div class="si-label">Model weights VRAM</div>
+      </div>
+      <div class="summary-item">
+        <div class="si-value yellow" id="sumKvPerReq">—</div>
+        <div class="si-label">KV cache per request</div>
+      </div>
+      <div class="summary-item">
+        <div class="si-value cyan" id="sumMaxConc">—</div>
+        <div class="si-label">Max concurrent requests</div>
+      </div>
+      <div class="summary-item">
+        <div class="si-value" id="sumCostPerM">—</div>
+        <div class="si-label">Est. cost / 1M context tokens</div>
+      </div>
+    </div>
+
+    <!-- VRAM bar -->
+    <div class="vram-section">
+      <div class="breakdown-title">VRAM Breakdown (per replica)</div>
+      <div class="vram-bar-wrap" id="vramBar">
+        <div class="vram-seg weights"  id="segWeights"  style="width:0%"></div>
+        <div class="vram-seg kvcache"  id="segKvCache"  style="width:0%"></div>
+        <div class="vram-seg overhead" id="segOverhead" style="width:0%"></div>
+        <div class="vram-seg free"     id="segFree"     style="width:0%"></div>
+      </div>
+      <div class="vram-legend">
+        <div class="legend-item"><div class="legend-dot weights"></div><span id="legWeights">Model weights</span></div>
+        <div class="legend-item"><div class="legend-dot kvcache"></div><span id="legKvCache">KV cache (max batch)</span></div>
+        <div class="legend-item"><div class="legend-dot overhead"></div><span>System overhead (~2 GB)</span></div>
+        <div class="legend-item"><div class="legend-dot free"></div><span id="legFree">Free VRAM</span></div>
+      </div>
+    </div>
+
+    <!-- Context length comparison table -->
+    <div class="breakdown-title">Context Length Impact</div>
+    <table class="ctx-table">
+      <thead>
+        <tr>
+          <th>Context</th>
+          <th>KV Cache / Req</th>
+          <th>Max Concurrent</th>
+          <th>vs. 4K baseline</th>
+          <th>Cost / 1M ctx tokens</th>
+          <th>Feasible?</th>
+        </tr>
+      </thead>
+      <tbody id="ctxBody"></tbody>
+    </table>
+
+    <div class="signal-box" id="signalBox"></div>
+
+    <!-- Share -->
+    <div class="share-row">
+      <button class="share-btn" id="shareBtn" onclick="copyShareLink()">🔗 Copy shareable link</button>
+    </div>
+
+    <!-- Lead capture -->
+    <div class="lead-section">
+      <p><strong>Running long-context workloads at scale?</strong><br/>Enter your email and we'll send a KV cache optimization report with recommendations for your specific model and traffic profile.</p>
+      <div class="lead-input-row">
+        <input type="email" id="leadEmail" placeholder="you@company.com" />
+        <button class="lead-submit-btn" onclick="submitLead()">Get Report</button>
+      </div>
+      <div class="lead-success" id="leadSuccess">✓ Sent! Check your inbox.</div>
+      <div class="lead-error"   id="leadError">Something went wrong — email us at info@paralleliq.ai</div>
+    </div>
+
+    <button class="calc-btn" onclick="window.location.href='https://github.com/paralleliq/piqc'">
+      Run a Free Scan — See Your Actual KV Cache Utilization
+    </button>
+
+    <div class="caveat" style="margin-top:16px;">
+      * KV cache sizes are computed from published model architectures (layers, KV heads, head dimension).
+      Actual VRAM usage varies with vLLM's PagedAttention block size, system overhead, and activation memory.
+      Cost estimates assume continuous operation; reserved/spot pricing reduces GPU costs 30–70%.
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  <p>Built by <a href="https://paralleliq.ai" target="_blank">Paralleliq</a> · <a href="mailto:info@paralleliq.ai">info@paralleliq.ai</a></p>
+</footer>
+
+<script>
+// ── Model architecture ─────────────────────────────────────────────────────
+// layers, kvHeads (GQA), headDim, weightGb (FP16)
+const MODELS = {
+  '7b':   { label: 'Llama 3 8B / Mistral 7B',     layers: 32,  kvHeads: 8,  headDim: 128, weightGb: 14  },
+  '13b':  { label: 'Llama 2 13B',                  layers: 40,  kvHeads: 40, headDim: 128, weightGb: 26  },
+  '30b':  { label: 'Llama 3 34B',                  layers: 48,  kvHeads: 8,  headDim: 128, weightGb: 60  },
+  '70b':  { label: 'Llama 3 70B / Mixtral 8×7B',   layers: 80,  kvHeads: 8,  headDim: 128, weightGb: 140 },
+  '180b': { label: 'Llama 3 405B / Mixtral 8×22B', layers: 126, kvHeads: 8,  headDim: 128, weightGb: 360 },
+};
+
+// ── GPU VRAM (GB) ──────────────────────────────────────────────────────────
+const GPU_VRAM = {
+  t4: 16, l4: 24, a10: 48, 'a100-40': 40, 'a100-80': 80,
+  h100: 80, h200: 141, mi300x: 192,
+};
+
+const GPU_NAMES = {
+  t4: 'T4 16GB', l4: 'L4 24GB', a10: 'A10 48GB',
+  'a100-40': 'A100 40GB', 'a100-80': 'A100 80GB',
+  h100: 'H100 80GB', h200: 'H200 141GB', mi300x: 'MI300X 192GB',
+};
+
+// ── Pricing ($/hr per GPU) ─────────────────────────────────────────────────
+const PRICES = {
+  gcp:       { t4: 0.35, l4: 0.54, a10: 0.90, 'a100-40': 2.21, 'a100-80': 3.06, h100: 3.50, h200: 5.00, mi300x: 4.50 },
+  aws:       { t4: 0.53, l4: 0.81, a10: 1.01, 'a100-40': 3.21, 'a100-80': 4.10, h100: 5.12, h200: 6.50, mi300x: 5.00 },
+  azure:     { t4: 0.53, l4: 0.60, a10: 1.10, 'a100-40': 3.40, 'a100-80': 3.67, h100: 5.80, h200: 7.00, mi300x: 5.20 },
+  coreweave: { t4: 0.28, l4: 0.44, a10: 0.85, 'a100-40': 2.06, 'a100-80': 2.76, h100: 2.95, h200: 4.25, mi300x: 3.80 },
+  lambda:    { t4: 0.30, l4: 0.50, a10: 0.75, 'a100-40': 1.99, 'a100-80': 2.50, h100: 2.49, h200: 3.90, mi300x: 3.50 },
+};
+
+// ── Context window steps ───────────────────────────────────────────────────
+const CTX_STEPS = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576];
+const CTX_LABELS = ['2K', '4K', '8K', '16K', '32K', '64K', '128K', '256K', '1M'];
+
+// ── KV cache size calculation ──────────────────────────────────────────────
+// Formula: 2 (K+V) × num_kv_heads × head_dim × num_layers × context_len × bytes_per_element
+function kvCacheGb(model, contextLen, bytesPerEl) {
+  const m = MODELS[model];
+  const bytes = 2 * m.kvHeads * m.headDim * m.layers * contextLen * bytesPerEl;
+  return bytes / 1e9;
+}
+
+// ── Max concurrent requests given available VRAM ───────────────────────────
+const OVERHEAD_GB = 2.0; // activations + system overhead
+
+function maxConcurrent(totalVramGb, weightGb, kvPerReqGb) {
+  const available = totalVramGb - weightGb - OVERHEAD_GB;
+  if (available <= 0 || kvPerReqGb <= 0) return 0;
+  return Math.max(0, Math.floor(available / kvPerReqGb));
+}
+
+// ── Cost per 1M context tokens ─────────────────────────────────────────────
+// At max concurrency: tokens delivered per second = maxConc × (outputTok / avgDecodeTime)
+// avgDecodeTime ≈ outputTok / base_tok_per_sec (simplified)
+// We use a simpler proxy: cost = (hourly × gpuCount) / (maxConc × contextLen / 1e6) per unit time
+// Annualised: GPU_hourly × gpuCount × 8760 / (annual_context_tokens / 1e6)
+function costPerMContextTokens(hourlyPerGpu, gpuCount, maxConc, contextLen, rps) {
+  if (maxConc === 0) return Infinity;
+  // annual context tokens = rps × contextLen × seconds_per_year
+  const annualCtxTokens = rps * contextLen * 8760 * 3600;
+  const annualCost = hourlyPerGpu * gpuCount * 8760;
+  return annualCost / (annualCtxTokens / 1e6);
+}
+
+// ── Slider ─────────────────────────────────────────────────────────────────
+function onSlider() {
+  const idx = parseInt(document.getElementById('ctxSlider').value);
+  document.getElementById('ctxLabel').textContent = CTX_LABELS[idx];
+  onInput();
+}
+
+// ── Model change — update arch note ───────────────────────────────────────
+function onModelChange() {
+  const m = MODELS[document.getElementById('model').value];
+  document.getElementById('archNote').textContent =
+    `Architecture: ${m.layers} layers · ${m.kvHeads} KV heads (GQA) · ${m.headDim}-dim · ${m.weightGb} GB weights (FP16)`;
+  onInput();
+}
+
+function onInput() {
+  if (document.getElementById('results').style.display !== 'none') calculate();
+}
+
+// ── Main calculation ───────────────────────────────────────────────────────
+function calculate() {
+  const modelKey  = document.getElementById('model').value;
+  const gpu       = document.getElementById('gpu').value;
+  const precision = parseFloat(document.getElementById('precision').value);
+  const provider  = document.getElementById('provider').value;
+  const rps       = parseFloat(document.getElementById('rps').value) || 1;
+  const outputTok = parseInt(document.getElementById('outputTok').value) || 512;
+  const gpuCount  = parseInt(document.getElementById('gpuCount').value) || 1;
+  const ctxIdx    = parseInt(document.getElementById('ctxSlider').value);
+  const ctxLen    = CTX_STEPS[ctxIdx];
+
+  const m          = MODELS[modelKey];
+  const totalVram  = GPU_VRAM[gpu] * gpuCount;
+  const kvPerReq   = kvCacheGb(modelKey, ctxLen, precision);
+  const maxConc    = maxConcurrent(totalVram, m.weightGb, kvPerReq);
+  const hourly     = PRICES[provider][gpu] || 0;
+  const cpm        = costPerMContextTokens(hourly, gpuCount, maxConc, ctxLen, rps);
+
+  // Headline
+  const kvStr = kvPerReq >= 1 ? `${kvPerReq.toFixed(2)} GB` : `${(kvPerReq * 1024).toFixed(0)} MB`;
+  document.getElementById('kvPerReq').textContent = kvStr;
+  document.getElementById('kvSub').textContent =
+    `per request at ${CTX_LABELS[ctxIdx]} context · ${m.layers} layers × ${m.kvHeads} KV heads × ${m.headDim}-dim · ${precision === 2 ? 'FP16' : precision === 1 ? 'FP8' : 'INT4'}`;
+
+  // Summary
+  document.getElementById('sumWeights').textContent  = `${m.weightGb} GB`;
+  document.getElementById('sumKvPerReq').textContent = kvStr;
+  document.getElementById('sumMaxConc').textContent  = maxConc > 0 ? maxConc : 'OOM';
+  const sumMaxEl = document.getElementById('sumMaxConc');
+  sumMaxEl.className = 'si-value ' + (maxConc === 0 ? 'red' : maxConc <= 2 ? 'yellow' : 'cyan');
+  document.getElementById('sumCostPerM').textContent = cpm === Infinity ? 'N/A' : `$${cpm.toFixed(3)}`;
+
+  // VRAM bar
+  const kvForBatch = kvPerReq * maxConc;
+  const usedVram   = m.weightGb + kvForBatch + OVERHEAD_GB;
+  const freeVram   = Math.max(0, totalVram - usedVram);
+
+  document.getElementById('segWeights').style.width  = `${(m.weightGb / totalVram * 100).toFixed(1)}%`;
+  document.getElementById('segKvCache').style.width  = `${(kvForBatch  / totalVram * 100).toFixed(1)}%`;
+  document.getElementById('segOverhead').style.width = `${(OVERHEAD_GB  / totalVram * 100).toFixed(1)}%`;
+  document.getElementById('segFree').style.width     = `${(freeVram     / totalVram * 100).toFixed(1)}%`;
+
+  document.getElementById('legWeights').textContent = `Model weights (${m.weightGb} GB)`;
+  document.getElementById('legKvCache').textContent = `KV cache — ${maxConc} req × ${kvStr} = ${kvForBatch.toFixed(1)} GB`;
+  document.getElementById('legFree').textContent    = `Free: ${freeVram.toFixed(1)} GB`;
+
+  // Context length comparison table
+  const baseline4k = maxConcurrent(totalVram, m.weightGb, kvCacheGb(modelKey, 4096, precision));
+
+  const rows = CTX_STEPS.map((ctx, i) => {
+    const kv      = kvCacheGb(modelKey, ctx, precision);
+    const conc    = maxConcurrent(totalVram, m.weightGb, kv);
+    const cpmRow  = costPerMContextTokens(hourly, gpuCount, conc, ctx, rps);
+    const kvStr2  = kv >= 1 ? `${kv.toFixed(2)} GB` : `${(kv * 1024).toFixed(0)} MB`;
+    const isCur   = i === ctxIdx;
+    const isOom   = conc === 0;
+    const pctOf4k = baseline4k > 0 ? Math.round(conc / baseline4k * 100) : 0;
+
+    let badge, rowClass = '';
+    if (isOom)        { badge = `<span class="ctx-badge danger">OOM</span>`; rowClass = 'warn-row'; }
+    else if (conc <= 1) { badge = `<span class="ctx-badge warn">⚠ ${conc} req</span>`; rowClass = 'warn-row'; }
+    else if (conc <= 4) { badge = `<span class="ctx-badge warn">Limited</span>`; }
+    else               { badge = `<span class="ctx-badge ok">OK</span>`; }
+
+    if (isCur) rowClass = 'current-row';
+
+    const vsBase = i === 1 ? '—' : (baseline4k > 0 ? `${pctOf4k}%` : 'N/A');
+    const vsColor = pctOf4k < 25 ? 'color:var(--red)' : pctOf4k < 60 ? 'color:var(--yellow)' : '';
+
+    return `
+      <tr class="${rowClass}">
+        <td><strong>${CTX_LABELS[i]}</strong>${isCur ? ' <span style="font-size:0.75rem;color:var(--blue);">◀ now</span>' : ''}</td>
+        <td>${kvStr2}</td>
+        <td style="${isOom ? 'color:var(--red)' : ''}">${isOom ? '0 (OOM)' : conc}</td>
+        <td style="${vsColor}">${vsBase}</td>
+        <td>${isOom || cpmRow === Infinity ? '<span style="color:var(--red)">N/A</span>' : '$' + cpmRow.toFixed(3)}</td>
+        <td>${badge}</td>
+      </tr>`;
+  });
+  document.getElementById('ctxBody').innerHTML = rows.join('');
+
+  // Signal box
+  let signal = '';
+  const maxFeasibleIdx = [...CTX_STEPS].map((ctx, i) =>
+    maxConcurrent(totalVram, m.weightGb, kvCacheGb(modelKey, ctx, precision)) > 0 ? i : -1
+  ).filter(i => i >= 0).pop() ?? -1;
+
+  if (maxConc === 0) {
+    signal = `<strong>Out of memory.</strong> At ${CTX_LABELS[ctxIdx]} context, the KV cache alone requires ${kvStr} — leaving no room for batching on ${GPU_NAMES[gpu]}. Consider FP8/INT4 KV quantization, a larger GPU, or tensor parallelism across more GPUs.`;
+  } else if (maxConc <= 2) {
+    signal = `<strong>Severe concurrency bottleneck.</strong> At ${CTX_LABELS[ctxIdx]} context you can serve only ${maxConc} concurrent request${maxConc > 1 ? 's' : ''} per replica. KV cache is consuming ${kvForBatch.toFixed(1)} GB of ${totalVram} GB VRAM. Switching to FP8 KV cache would double your concurrency to ~${maxConcurrent(totalVram, m.weightGb, kvCacheGb(modelKey, ctxLen, 1))}.`;
+  } else if (maxConc <= 8) {
+    signal = `<strong>Context tax is real.</strong> ${CTX_LABELS[ctxIdx]} context limits you to ${maxConc} concurrent requests — ${pctStr(maxConc, baseline4k)} of what you could serve at 4K context. Each additional 2× in context length halves your effective throughput.`;
+  } else {
+    signal = `<strong>Healthy concurrency at ${CTX_LABELS[ctxIdx]}.</strong> ${maxConc} concurrent requests fits within your VRAM budget. Watch the table above — you'll hit a cliff as context grows past ${CTX_LABELS[Math.min(maxFeasibleIdx, CTX_STEPS.length - 1)]}.`;
+  }
+  document.getElementById('signalBox').innerHTML = signal;
+
+  document.getElementById('results').style.display = 'block';
+
+  gtag('event', 'kvcache_calculate', {
+    model: modelKey, gpu, precision, context_len: ctxLen,
+    max_concurrent: maxConc, kv_per_req_gb: Math.round(kvPerReq * 100) / 100,
+  });
+}
+
+function pctStr(val, base) {
+  if (!base) return '—';
+  return `${Math.round(val / base * 100)}%`;
+}
+
+// ── Shareable URL ──────────────────────────────────────────────────────────
+function copyShareLink() {
+  const params = new URLSearchParams({
+    model:    document.getElementById('model').value,
+    gpu:      document.getElementById('gpu').value,
+    prec:     document.getElementById('precision').value,
+    provider: document.getElementById('provider').value,
+    rps:      document.getElementById('rps').value,
+    out:      document.getElementById('outputTok').value,
+    gpus:     document.getElementById('gpuCount').value,
+    ctx:      document.getElementById('ctxSlider').value,
+  });
+  navigator.clipboard.writeText(`${location.origin}${location.pathname}?${params}`).then(() => {
+    const btn = document.getElementById('shareBtn');
+    btn.textContent = '✓ Copied!'; btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '🔗 Copy shareable link'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+function loadFromUrl() {
+  const p = new URLSearchParams(location.search);
+  if (!p.has('model')) return false;
+  document.getElementById('model').value     = p.get('model')    || '70b';
+  document.getElementById('gpu').value       = p.get('gpu')      || 'a100-80';
+  document.getElementById('precision').value = p.get('prec')     || '2';
+  document.getElementById('provider').value  = p.get('provider') || 'gcp';
+  document.getElementById('rps').value       = p.get('rps')      || '5';
+  document.getElementById('outputTok').value = p.get('out')      || '512';
+  document.getElementById('gpuCount').value  = p.get('gpus')     || '1';
+  document.getElementById('ctxSlider').value = p.get('ctx')      || '4';
+  document.getElementById('ctxLabel').textContent = CTX_LABELS[parseInt(p.get('ctx')) || 4];
+  onModelChange();
+  calculate();
+  return true;
+}
+
+// ── Lead capture ───────────────────────────────────────────────────────────
+async function submitLead() {
+  const email = document.getElementById('leadEmail').value.trim();
+  if (!email || !email.includes('@')) return;
+  const payload = {
+    email,
+    calculator: 'KV Cache & Context Window Cost',
+    model:      document.getElementById('model').value,
+    gpu:        document.getElementById('gpu').value,
+    precision:  document.getElementById('precision').value,
+    context:    CTX_LABELS[parseInt(document.getElementById('ctxSlider').value)],
+  };
+  try {
+    const resp = await fetch('https://formspree.io/f/xyklnbgy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (resp.ok) {
+      document.getElementById('leadSuccess').style.display = 'block';
+      document.getElementById('leadError').style.display   = 'none';
+      gtag('event', 'lead_capture', { email_domain: email.split('@')[1], calculator: 'kvcache' });
+    } else { document.getElementById('leadError').style.display = 'block'; }
+  } catch { document.getElementById('leadError').style.display = 'block'; }
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+if (!loadFromUrl()) {
+  onModelChange();
+  calculate();
+}
+</script>
+
+</body>
+</html>
